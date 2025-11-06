@@ -11,75 +11,78 @@ jobs:
     timeout-minutes: 4320
 
     steps:
-    - name: Check if Secrets are Set
-      run: |
-        if (-not "${{ secrets.RDP_PASSWORD }}") {
-            Write-Error "❌ RDP_PASSWORD secret is not set!"
-            Write-Host "Please set RDP_PASSWORD in repository secrets"
-            exit 1
-        }
-        if (-not "${{ secrets.TAILSCALE_AUTH_KEY }}") {
-            Write-Error "❌ TAILSCALE_AUTH_KEY secret is not set!"
-            Write-Host "Please set TAILSCALE_AUTH_KEY in repository secrets"
-            exit 1
-        }
-        Write-Host "✅ All secrets are properly set"
-
     - name: Configure Maximum Performance
       run: |
+        # تفعيل وضع الأداء العالي
         powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        
+        # تحسين إدارة الذاكرة
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0
         
+        # تعطيل الخدمات غير الضرورية
         $servicesToDisable = @(
             "XboxGipSvc",
             "XboxNetApiSvc", 
             "WSearch",
-            "TabletInputService"
+            "TabletInputService",
+            "MapsBroker",
+            "lfsvc"
         )
         
         foreach ($service in $servicesToDisable) {
             try {
                 Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
                 Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
-                Write-Host "Disabled service: $service"
+                Write-Host "✅ Disabled service: $service"
             } catch {
-                Write-Host "Could not disable service: $service"
+                Write-Host "⚠️ Could not disable service: $service"
             }
         }
 
     - name: Enable RDP with Admin Rights
       run: |
+        # تفعيل RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
         
+        # إعدادات RDP متقدمة للأداء
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxInstanceCount" -Value 4294967295
+        
+        # جدار الحماية
         netsh advfirewall firewall add rule name="RDP-Premium" dir=in action=allow protocol=TCP localport=3389
         Restart-Service -Name TermService -Force
+        Write-Host "✅ RDP enabled and configured"
 
-    - name: Create Admin User
+    - name: Create Admin User with New Password
       run: |
-        # استخدام الـ secret بشكل آمن
-        $password = "${{ secrets.RDP_PASSWORD }}"
+        # استخدام الباسورد الجديد مباشرة
+        $password = "01276205280"
         
         # التحقق من أن الباسورد ليس فارغاً
         if ([string]::IsNullOrWhiteSpace($password)) {
-            Write-Error "RDP_PASSWORD is empty!"
+            Write-Error "❌ Password is empty!"
             exit 1
         }
         
         $securePass = ConvertTo-SecureString $password -AsPlainText -Force
         
+        # حذف المستخدم إذا كان موجوداً
         if (Get-LocalUser -Name "AdminUser" -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name "AdminUser"
+            Write-Host "✅ Removed existing AdminUser"
         }
         
-        New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires
+        # إنشاء المستخدم الجديد
+        New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires -FullName "Administrator"
         Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
+        Add-LocalGroupMember -Group "Remote Management Users" -Member "AdminUser"
         
-        Write-Host "✅ Admin user created successfully"
+        Write-Host "✅ Admin user created successfully with new password"
 
     - name: Install Essential Software
       run: |
+        # تثبيت Chrome
         $chromeUrl = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B807C7F79-8B02-11F9-B11A-5C5394DFDCEB%7D%26lang%3Den%26browser%3D4%26usagestats%3D1%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3Dx64-stable-statsdef_2%26installdataindex%3Dempty/chrome/install/ChromeStandaloneSetup64.exe"
         $chromePath = "$env:TEMP\chrome_installer.exe"
         
@@ -90,6 +93,18 @@ jobs:
             Write-Host "✅ Chrome installed successfully"
         } catch {
             Write-Host "⚠️ Failed to install Chrome"
+        }
+
+        # تثبيت 7-Zip
+        try {
+            $7zipUrl = "https://www.7-zip.org/a/7z2409-x64.msi"
+            $7zipPath = "$env:TEMP\7zip.msi"
+            Invoke-WebRequest -Uri $7zipUrl -OutFile $7zipPath
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$7zipPath`"", "/quiet", "/norestart" -Wait
+            Remove-Item $7zipPath -Force
+            Write-Host "✅ 7-Zip installed successfully"
+        } catch {
+            Write-Host "⚠️ Failed to install 7-Zip"
         }
 
     - name: Install Tailscale
@@ -110,18 +125,18 @@ jobs:
     - name: Connect to Tailscale Network
       run: |
         try {
-            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-premium-$env:GITHUB_RUN_ID
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-premium-$env:GITHUB_RUN_ID --accept-routes=true --accept-dns=true
             
             $tsIP = $null
             $retries = 0
-            while (-not $tsIP -and $retries -lt 20) {
+            while (-not $tsIP -and $retries -lt 25) {
                 $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
                 Start-Sleep -Seconds 3
                 $retries++
             }
             
             if (-not $tsIP) {
-                Write-Error "❌ Tailscale IP not assigned after 20 retries"
+                Write-Error "❌ Tailscale IP not assigned after 25 retries"
                 exit 1
             }
             
@@ -133,10 +148,22 @@ jobs:
             exit 1
         }
 
+    - name: Final System Optimization
+      run: |
+        # تحسينات نهائية للنظام
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0 -Force
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name "LongPathsEnabled" -Value 1 -Force
+        
+        # تنظيف الملفات المؤقتة
+        Remove-Item "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+        Cleanmgr /sagerun:1 | Out-Null
+        
+        Write-Host "✅ System optimization completed"
+
     - name: Verify RDP Connection
       run: |
         try {
-            Write-Host "Testing RDP connection on IP: $env:TAILSCALE_IP"
+            Write-Host "🔍 Testing RDP connection on IP: $env:TAILSCALE_IP"
             $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
             if ($test.TcpTestSucceeded) {
                 Write-Host "✅ RDP connection verified successfully!"
@@ -144,6 +171,11 @@ jobs:
                 Write-Host "❌ RDP connection failed - restarting Terminal Service"
                 Restart-Service -Name TermService -Force
                 Start-Sleep -Seconds 10
+                # إعادة المحاولة بعد إعادة التشغيل
+                $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+                if ($test.TcpTestSucceeded) {
+                    Write-Host "✅ RDP connection working after restart!"
+                }
             }
         } catch {
             Write-Host "⚠️ RDP test encountered an error"
@@ -152,23 +184,47 @@ jobs:
     - name: Display RDP Details
       run: |
         Write-Host ""
-        Write-Host "🎉 WINDOWS 10 RDP READY 🎉"
+        Write-Host "🎉 PREMIUM WINDOWS 10 RDP READY 🎉"
         Write-Host "========================================"
         Write-Host "🌐 Address: $env:TAILSCALE_IP"
         Write-Host "👤 Username: AdminUser"
-        Write-Host "🔑 Password: (From RDP_PASSWORD secret)"
+        Write-Host "🔑 Password: 01276205280"
         Write-Host "⏰ Duration: 72 Hours"
         Write-Host "💻 Admin Rights: ✅ Full Access"
+        Write-Host "🛠️  Installed: Chrome, 7-Zip, Tailscale"
         Write-Host "========================================"
+        Write-Host "📋 Connection Instructions:"
+        Write-Host "1. Open Remote Desktop Connection"
+        Write-Host "2. Enter the IP address above"
+        Write-Host "3. Username: AdminUser"
+        Write-Host "4. Password: 01276205280"
+        Write-Host "5. Click Connect and enjoy!"
         Write-Host ""
 
     - name: Keep Session Active
       run: |
         Write-Host "🟢 RDP Session Started - Keeping alive for 72 hours..."
+        Write-Host "💡 You can now connect using the details above"
+        
         for ($i=0; $i -lt 864; $i++) {
             $remaining = (864 - $i) * 5
             $hours = [math]::Floor($remaining / 60)
             $minutes = $remaining % 60
-            Write-Host "⏱️  RDP Active - $hoursh $minutesm remaining"
+            
+            # عرض حالة الاتصال كل 30 دقيقة
+            if ($i % 6 -eq 0) {
+                try {
+                    $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+                    $status = if ($test.TcpTestSucceeded) { "✅ Connected" } else { "❌ Disconnected" }
+                    Write-Host "⏱️  RDP Active - $hoursh $minutesm remaining - Status: $status"
+                } catch {
+                    Write-Host "⏱️  RDP Active - $hoursh $minutesm remaining - Status: ⚠️ Checking..."
+                }
+            } else {
+                Write-Host "⏱️  RDP Active - $hoursh $minutesm remaining"
+            }
+            
             Start-Sleep -Seconds 300
         }
+        
+        Write-Host "🛑 RDP Session Ended - 72 hours completed"
