@@ -11,18 +11,28 @@ jobs:
     timeout-minutes: 4320
 
     steps:
+    - name: Check if Secrets are Set
+      run: |
+        if (-not "${{ secrets.RDP_PASSWORD }}") {
+            Write-Error "❌ RDP_PASSWORD secret is not set!"
+            Write-Host "Please set RDP_PASSWORD in repository secrets"
+            exit 1
+        }
+        if (-not "${{ secrets.TAILSCALE_AUTH_KEY }}") {
+            Write-Error "❌ TAILSCALE_AUTH_KEY secret is not set!"
+            Write-Host "Please set TAILSCALE_AUTH_KEY in repository secrets"
+            exit 1
+        }
+        Write-Host "✅ All secrets are properly set"
+
     - name: Configure Maximum Performance
       run: |
-        # تفعيل وضع الأداء العالي
         powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-        
-        # تحسين إدارة الذاكرة
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0
         
-        # تعطيل الخدمات غير الضرورية بأمان
         $servicesToDisable = @(
             "XboxGipSvc",
-            "XboxNetApiSvc",
+            "XboxNetApiSvc", 
             "WSearch",
             "TabletInputService"
         )
@@ -45,13 +55,19 @@ jobs:
         netsh advfirewall firewall add rule name="RDP-Premium" dir=in action=allow protocol=TCP localport=3389
         Restart-Service -Name TermService -Force
 
-    - name: Create Admin User (Secure)
+    - name: Create Admin User
       run: |
-        # استخدم secret آمن - لا تضع الباسورد في الكود!
+        # استخدام الـ secret بشكل آمن
         $password = "${{ secrets.RDP_PASSWORD }}"
+        
+        # التحقق من أن الباسورد ليس فارغاً
+        if ([string]::IsNullOrWhiteSpace($password)) {
+            Write-Error "RDP_PASSWORD is empty!"
+            exit 1
+        }
+        
         $securePass = ConvertTo-SecureString $password -AsPlainText -Force
         
-        # حذف المستخدم إذا كان موجوداً
         if (Get-LocalUser -Name "AdminUser" -ErrorAction SilentlyContinue) {
             Remove-LocalUser -Name "AdminUser"
         }
@@ -60,22 +76,20 @@ jobs:
         Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
         
-        Write-Host "Admin user created successfully"
+        Write-Host "✅ Admin user created successfully"
 
     - name: Install Essential Software
       run: |
-        # تثبيت برامج أساسية فقط
         $chromeUrl = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B807C7F79-8B02-11F9-B11A-5C5394DFDCEB%7D%26lang%3Den%26browser%3D4%26usagestats%3D1%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3Dx64-stable-statsdef_2%26installdataindex%3Dempty/chrome/install/ChromeStandaloneSetup64.exe"
         $chromePath = "$env:TEMP\chrome_installer.exe"
         
         try {
-            # تثبيت Chrome
             Invoke-WebRequest -Uri $chromeUrl -OutFile $chromePath
             Start-Process -FilePath $chromePath -ArgumentList "/silent", "/install" -Wait
             Remove-Item $chromePath -Force
-            Write-Host "Chrome installed successfully"
+            Write-Host "✅ Chrome installed successfully"
         } catch {
-            Write-Host "Failed to install Chrome"
+            Write-Host "⚠️ Failed to install Chrome"
         }
 
     - name: Install Tailscale
@@ -87,9 +101,9 @@ jobs:
             Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
             Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
             Remove-Item $installerPath -Force
-            Write-Host "Tailscale installed successfully"
+            Write-Host "✅ Tailscale installed successfully"
         } catch {
-            Write-Error "Failed to install Tailscale"
+            Write-Error "❌ Failed to install Tailscale"
             exit 1
         }
 
@@ -107,15 +121,15 @@ jobs:
             }
             
             if (-not $tsIP) {
-                Write-Error "Tailscale IP not assigned after 20 retries"
+                Write-Error "❌ Tailscale IP not assigned after 20 retries"
                 exit 1
             }
             
             echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-            Write-Host "Tailscale connected successfully - IP: $tsIP"
+            Write-Host "✅ Tailscale connected - IP: $tsIP"
             
         } catch {
-            Write-Error "Failed to connect to Tailscale"
+            Write-Error "❌ Failed to connect to Tailscale"
             exit 1
         }
 
@@ -155,6 +169,6 @@ jobs:
             $remaining = (864 - $i) * 5
             $hours = [math]::Floor($remaining / 60)
             $minutes = $remaining % 60
-            Write-Host "⏱️  RDP Active - Time remaining: $hours hours $minutes minutes"
+            Write-Host "⏱️  RDP Active - $hoursh $minutesm remaining"
             Start-Sleep -Seconds 300
         }
