@@ -1,0 +1,106 @@
+name: Windows 10 RDP Premium (30 Days)
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 */3 * *"
+
+jobs:
+  premium-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 4320
+
+    steps:
+    - name: Configure Maximum Performance
+      run: |
+        # تفعيل وضع الأداء العالي
+        powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        
+        # تحسين إدارة الذاكرة
+        Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0
+        
+        # تعطيل الخدمات غير الضرورية لتحرير الذاكرة
+        Get-Service | Where-Object {$_.Name -like "*xbox*" -or $_.Name -like "*game*"} | Stop-Service -Force
+
+    - name: Enable RDP with Admin Rights
+      run: |
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+        
+        netsh advfirewall firewall add rule name="RDP-Premium" dir=in action=allow protocol=TCP localport=3389
+        Restart-Service -Name TermService -Force
+
+    - name: Create Admin User (Secure)
+      run: |
+        # استخدم secret آمن - لا تضع الباسورد في الكود!
+        $password = "${{ secrets.RDP_PASSWORD }}"
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+        
+        New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
+
+    - name: Install Performance Software
+      run: |
+        # تثبيت برامج لتحسين الأداء
+        $software = @(
+            "https://www.google.com/chrome/install/browser/standalone/GoogleChromeStandaloneEnterprise64.msi",
+            "https://www.7-zip.org/a/7z2409-x64.msi"
+        )
+        
+        foreach ($url in $software) {
+            $fileName = [System.IO.Path]::GetFileName($url)
+            $installerPath = "$env:TEMP\$fileName"
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $installerPath
+                Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+                Remove-Item $installerPath -Force
+            } catch {
+                Write-Host "Failed to install: $fileName"
+            }
+        }
+
+    - name: Install Tailscale
+      run: |
+        $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
+        $installerPath = "$env:TEMP\tailscale.msi"
+        
+        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+        Remove-Item $installerPath -Force
+
+    - name: Connect to Tailscale Network
+      run: |
+        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-premium-$env:GITHUB_RUN_ID
+        
+        $tsIP = $null
+        $retries = 0
+        while (-not $tsIP -and $retries -lt 15) {
+            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            Start-Sleep -Seconds 3
+            $retries++
+        }
+        
+        if (-not $tsIP) {
+            Write-Error "Tailscale IP not assigned"
+            exit 1
+        }
+        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+    - name: Display RDP Details
+      run: |
+        Write-Host "`n🎉 WINDOWS 10 RDP READY 🎉"
+        Write-Host "========================================"
+        Write-Host "🌐 Address: $env:TAILSCALE_IP"
+        Write-Host "👤 Username: AdminUser"
+        Write-Host "🔑 Password: (From RDP_PASSWORD secret)"
+        Write-Host "⏰ Duration: 72 Hours"
+        Write-Host "💻 Specs: Windows 10 + Admin Rights"
+        Write-Host "========================================`n"
+
+    - name: Keep Session Active
+      run: |
+        for ($i=0; $i -lt 864; $i++) {
+            Write-Host "🟢 RDP Active - Time remaining: $((864 - $i) * 5) minutes"
+            Start-Sleep -Seconds 300
+        }
