@@ -19,6 +19,13 @@ jobs:
         # تحسين إدارة الذاكرة
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0
         
+        # تعطيل متطلبات تعقيد كلمة المرور
+        secedit /export /cfg C:\secpol.cfg
+        ((Get-Content C:\secpol.cfg) -replace "PasswordComplexity = 1", "PasswordComplexity = 0") | Set-Content C:\secpol.cfg
+        ((Get-Content C:\secpol.cfg) -replace "MinimumPasswordLength = 7", "MinimumPasswordLength = 1") | Set-Content C:\secpol.cfg
+        secedit /configure /db C:\Windows\security\local.sdb /cfg C:\secpol.cfg /areas SECURITYPOLICY
+        Remove-Item C:\secpol.cfg -Force
+        
         # تعطيل الخدمات غير الضرورية
         $servicesToDisable = @(
             "XboxGipSvc",
@@ -53,10 +60,10 @@ jobs:
         Restart-Service -Name TermService -Force
         Write-Host "✅ RDP enabled and configured"
 
-    - name: Create Admin User with New Password
+    - name: Create Admin User with Strong Password
       run: |
-        # استخدام الباسورد الجديد مباشرة
-        $password = "01276205280"
+        # استخدام كلمة مرور قوية تستوفي المتطلبات
+        $password = "Windows10RDP@2024!"
         
         # التحقق من أن الباسورد ليس فارغاً
         if ([string]::IsNullOrWhiteSpace($password)) {
@@ -64,6 +71,7 @@ jobs:
             exit 1
         }
         
+        Write-Host "Creating user with password: $password"
         $securePass = ConvertTo-SecureString $password -AsPlainText -Force
         
         # حذف المستخدم إذا كان موجوداً
@@ -73,12 +81,21 @@ jobs:
         }
         
         # إنشاء المستخدم الجديد
-        New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires -FullName "Administrator"
+        try {
+            New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires -FullName "Administrator" -Description "RDP Admin User"
+            Write-Host "✅ User created successfully"
+        } catch {
+            Write-Host "❌ Failed to create user with first method, trying alternative..."
+            # طريقة بديلة لإنشاء المستخدم
+            net user AdminUser "$password" /add /fullname:"Administrator" /comment:"RDP Admin User" /expires:never /passwordchg:no
+        }
+        
+        # إضافة المستخدم إلى المجموعات
         Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
         Add-LocalGroupMember -Group "Remote Management Users" -Member "AdminUser"
         
-        Write-Host "✅ Admin user created successfully with new password"
+        Write-Host "✅ Admin user created successfully with password: Windows10RDP@2024!"
 
     - name: Install Essential Software
       run: |
@@ -188,7 +205,7 @@ jobs:
         Write-Host "========================================"
         Write-Host "🌐 Address: $env:TAILSCALE_IP"
         Write-Host "👤 Username: AdminUser"
-        Write-Host "🔑 Password: 01276205280"
+        Write-Host "🔑 Password: Windows10RDP@2024!"
         Write-Host "⏰ Duration: 72 Hours"
         Write-Host "💻 Admin Rights: ✅ Full Access"
         Write-Host "🛠️  Installed: Chrome, 7-Zip, Tailscale"
@@ -197,7 +214,7 @@ jobs:
         Write-Host "1. Open Remote Desktop Connection"
         Write-Host "2. Enter the IP address above"
         Write-Host "3. Username: AdminUser"
-        Write-Host "4. Password: 01276205280"
+        Write-Host "4. Password: Windows10RDP@2024!"
         Write-Host "5. Click Connect and enjoy!"
         Write-Host ""
 
