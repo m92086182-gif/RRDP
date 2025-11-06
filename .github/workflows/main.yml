@@ -19,8 +19,23 @@ jobs:
         # تحسين إدارة الذاكرة
         Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name "ClearPageFileAtShutdown" -Value 0
         
-        # تعطيل الخدمات غير الضرورية لتحرير الذاكرة
-        Get-Service | Where-Object {$_.Name -like "*xbox*" -or $_.Name -like "*game*"} | Stop-Service -Force
+        # تعطيل الخدمات غير الضرورية بأمان
+        $servicesToDisable = @(
+            "XboxGipSvc",
+            "XboxNetApiSvc",
+            "WSearch",
+            "TabletInputService"
+        )
+        
+        foreach ($service in $servicesToDisable) {
+            try {
+                Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+                Write-Host "Disabled service: $service"
+            } catch {
+                Write-Host "Could not disable service: $service"
+            }
+        }
 
     - name: Enable RDP with Admin Rights
       run: |
@@ -36,28 +51,31 @@ jobs:
         $password = "${{ secrets.RDP_PASSWORD }}"
         $securePass = ConvertTo-SecureString $password -AsPlainText -Force
         
+        # حذف المستخدم إذا كان موجوداً
+        if (Get-LocalUser -Name "AdminUser" -ErrorAction SilentlyContinue) {
+            Remove-LocalUser -Name "AdminUser"
+        }
+        
         New-LocalUser -Name "AdminUser" -Password $securePass -AccountNeverExpires
         Add-LocalGroupMember -Group "Administrators" -Member "AdminUser"
         Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AdminUser"
-
-    - name: Install Performance Software
-      run: |
-        # تثبيت برامج لتحسين الأداء
-        $software = @(
-            "https://www.google.com/chrome/install/browser/standalone/GoogleChromeStandaloneEnterprise64.msi",
-            "https://www.7-zip.org/a/7z2409-x64.msi"
-        )
         
-        foreach ($url in $software) {
-            $fileName = [System.IO.Path]::GetFileName($url)
-            $installerPath = "$env:TEMP\$fileName"
-            try {
-                Invoke-WebRequest -Uri $url -OutFile $installerPath
-                Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-                Remove-Item $installerPath -Force
-            } catch {
-                Write-Host "Failed to install: $fileName"
-            }
+        Write-Host "Admin user created successfully"
+
+    - name: Install Essential Software
+      run: |
+        # تثبيت برامج أساسية فقط
+        $chromeUrl = "https://dl.google.com/tag/s/appguid%3D%7B8A69D345-D564-463C-AFF1-A69D9E530F96%7D%26iid%3D%7B807C7F79-8B02-11F9-B11A-5C5394DFDCEB%7D%26lang%3Den%26browser%3D4%26usagestats%3D1%26appname%3DGoogle%2520Chrome%26needsadmin%3Dprefers%26ap%3Dx64-stable-statsdef_2%26installdataindex%3Dempty/chrome/install/ChromeStandaloneSetup64.exe"
+        $chromePath = "$env:TEMP\chrome_installer.exe"
+        
+        try {
+            # تثبيت Chrome
+            Invoke-WebRequest -Uri $chromeUrl -OutFile $chromePath
+            Start-Process -FilePath $chromePath -ArgumentList "/silent", "/install" -Wait
+            Remove-Item $chromePath -Force
+            Write-Host "Chrome installed successfully"
+        } catch {
+            Write-Host "Failed to install Chrome"
         }
 
     - name: Install Tailscale
@@ -65,42 +83,78 @@ jobs:
         $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
         $installerPath = "$env:TEMP\tailscale.msi"
         
-        Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-        Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-        Remove-Item $installerPath -Force
+        try {
+            Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+            Remove-Item $installerPath -Force
+            Write-Host "Tailscale installed successfully"
+        } catch {
+            Write-Error "Failed to install Tailscale"
+            exit 1
+        }
 
     - name: Connect to Tailscale Network
       run: |
-        & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-premium-$env:GITHUB_RUN_ID
-        
-        $tsIP = $null
-        $retries = 0
-        while (-not $tsIP -and $retries -lt 15) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-            Start-Sleep -Seconds 3
-            $retries++
-        }
-        
-        if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned"
+        try {
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=win10-premium-$env:GITHUB_RUN_ID
+            
+            $tsIP = $null
+            $retries = 0
+            while (-not $tsIP -and $retries -lt 20) {
+                $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+                Start-Sleep -Seconds 3
+                $retries++
+            }
+            
+            if (-not $tsIP) {
+                Write-Error "Tailscale IP not assigned after 20 retries"
+                exit 1
+            }
+            
+            echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+            Write-Host "Tailscale connected successfully - IP: $tsIP"
+            
+        } catch {
+            Write-Error "Failed to connect to Tailscale"
             exit 1
         }
-        echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+    - name: Verify RDP Connection
+      run: |
+        try {
+            Write-Host "Testing RDP connection on IP: $env:TAILSCALE_IP"
+            $test = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389 -WarningAction SilentlyContinue
+            if ($test.TcpTestSucceeded) {
+                Write-Host "✅ RDP connection verified successfully!"
+            } else {
+                Write-Host "❌ RDP connection failed - restarting Terminal Service"
+                Restart-Service -Name TermService -Force
+                Start-Sleep -Seconds 10
+            }
+        } catch {
+            Write-Host "⚠️ RDP test encountered an error"
+        }
 
     - name: Display RDP Details
       run: |
-        Write-Host "`n🎉 WINDOWS 10 RDP READY 🎉"
+        Write-Host ""
+        Write-Host "🎉 WINDOWS 10 RDP READY 🎉"
         Write-Host "========================================"
         Write-Host "🌐 Address: $env:TAILSCALE_IP"
         Write-Host "👤 Username: AdminUser"
         Write-Host "🔑 Password: (From RDP_PASSWORD secret)"
         Write-Host "⏰ Duration: 72 Hours"
-        Write-Host "💻 Specs: Windows 10 + Admin Rights"
-        Write-Host "========================================`n"
+        Write-Host "💻 Admin Rights: ✅ Full Access"
+        Write-Host "========================================"
+        Write-Host ""
 
     - name: Keep Session Active
       run: |
+        Write-Host "🟢 RDP Session Started - Keeping alive for 72 hours..."
         for ($i=0; $i -lt 864; $i++) {
-            Write-Host "🟢 RDP Active - Time remaining: $((864 - $i) * 5) minutes"
+            $remaining = (864 - $i) * 5
+            $hours = [math]::Floor($remaining / 60)
+            $minutes = $remaining % 60
+            Write-Host "⏱️  RDP Active - Time remaining: $hours hours $minutes minutes"
             Start-Sleep -Seconds 300
         }
